@@ -2311,6 +2311,8 @@ std::string ValidationState_t::VkErrorID(uint32_t id,
       return VUID_WRAP(VUID-StandaloneSpirv-None-04644);
     case 4645:
       return VUID_WRAP(VUID-StandaloneSpirv-None-04645);
+    case 10609:
+      return VUID_WRAP(VUID-StandaloneSpirv-OpControlBarrier-10609);
     case 4650:
       return VUID_WRAP(VUID-StandaloneSpirv-OpControlBarrier-04650);
     case 4651:
@@ -2523,6 +2525,8 @@ std::string ValidationState_t::VkErrorID(uint32_t id,
       return VUID_WRAP(VUID-StandaloneSpirv-OpEntryPoint-08722);
     case 8973:
       return VUID_WRAP(VUID-StandaloneSpirv-Pointer-08973);
+    case 9557:
+    return VUID_WRAP(VUID-StandaloneSpirv-Input-09557);
     case 9638:
       return VUID_WRAP(VUID-StandaloneSpirv-OpTypeImage-09638);
     case 9658:
