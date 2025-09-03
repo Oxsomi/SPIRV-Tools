@@ -68,6 +68,7 @@ class ValidationState_t {
   struct Feature {
     bool declare_int16_type = false;     // Allow OpTypeInt with 16 bit width?
     bool declare_float16_type = false;   // Allow OpTypeFloat with 16 bit width?
+    bool declare_float8_type = false;    // Allow OpTypeFloat with 8 bit width?
     bool free_fp_rounding_mode = false;  // Allow the FPRoundingMode decoration
                                          // and its values to be used without
                                          // requiring any capability
@@ -637,6 +638,12 @@ class ValidationState_t {
   bool IsScalarType(uint32_t id) const;
   bool IsBfloat16ScalarType(uint32_t id) const;
   bool IsBfloat16VectorType(uint32_t id) const;
+  bool IsBfloat16CoopMatType(uint32_t id) const;
+  bool IsBfloat16Type(uint32_t id) const;
+  bool IsFP8ScalarType(uint32_t id) const;
+  bool IsFP8VectorType(uint32_t id) const;
+  bool IsFP8CoopMatType(uint32_t id) const;
+  bool IsFP8Type(uint32_t id) const;
   bool IsFloatScalarType(uint32_t id) const;
   bool IsFloatArrayType(uint32_t id) const;
   bool IsFloatVectorType(uint32_t id) const;
@@ -768,6 +775,16 @@ class ValidationState_t {
     pointer_to_storage_image_.insert(type_id);
   }
 
+  // Is the ID the type of a pointer to a tensor?  That is, the pointee
+  // type is a tensor type.
+  bool IsPointerToTensor(uint32_t type_id) const {
+    return pointer_to_tensor_.find(type_id) != pointer_to_tensor_.cend();
+  }
+  // Save the ID of a pointer to a tensor.
+  void RegisterPointerToTensor(uint32_t type_id) {
+    pointer_to_tensor_.insert(type_id);
+  }
+
   // Tries to evaluate a any scalar integer OpConstant as uint64.
   // OpConstantNull is defined as zero for scalar int (will return true)
   // OpSpecConstant* return false since their values cannot be relied upon
@@ -839,6 +856,12 @@ class ValidationState_t {
 
   // Validates the storage class for the target environment.
   bool IsValidStorageClass(spv::StorageClass storage_class) const;
+
+  // Helps formulate a mesesage to user that setting one of the validator
+  // options might make their SPIR-V actually valid The |hint| option is because
+  // some checks are intertwined with each other, so hard to give confirmation
+  std::string MissingFeature(const std::string& feature,
+                             const std::string& cmdline, bool hint) const;
 
   // Takes a Vulkan Valid Usage ID (VUID) as |id| and optional |reference| and
   // will return a non-empty string only if ID is known and targeting Vulkan.
@@ -1026,6 +1049,9 @@ class ValidationState_t {
   // The IDs of types of pointers to storage images.  This is populated in the
   // TypePass.
   std::unordered_set<uint32_t> pointer_to_storage_image_;
+  // The IDs of types of pointers to tensors.  This is populated in the
+  // TypePass.
+  std::unordered_set<uint32_t> pointer_to_tensor_;
 
   /// Maps ids to friendly names.
   std::unique_ptr<spvtools::FriendlyNameMapper> friendly_mapper_;

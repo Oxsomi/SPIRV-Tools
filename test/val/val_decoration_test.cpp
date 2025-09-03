@@ -5445,6 +5445,97 @@ OpFunctionEnd
   EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
 }
 
+// OpDecorateId
+
+TEST_F(ValidateDecorations, DecorateIdGood) {
+  const std::string spirv = R"(
+OpCapability Shader
+OpMemoryModel Logical Simple
+OpEntryPoint GLCompute %main "main"
+OpExecutionMode %main LocalSize 1 1 1
+OpName %subgroupscope "subgroupscope"
+OpName %int0 "int0"
+OpName %fn "fn"
+OpDecorateId %int0 UniformId %subgroupscope
+%void = OpTypeVoid
+%float = OpTypeFloat 32
+%int = OpTypeInt 32 1
+%subgroupscope = OpConstant %int 3
+%int0 = OpConstantNull %int
+%fn = OpTypeFunction %void
+%main = OpFunction %void None %fn
+%entry = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(spirv, SPV_ENV_UNIVERSAL_1_4);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions(SPV_ENV_UNIVERSAL_1_4));
+  EXPECT_THAT(getDiagnosticString(), Eq(""));
+}
+
+TEST_F(ValidateDecorations, DecorateIdGroupBad) {
+  const std::string spirv = R"(
+OpCapability Shader
+OpMemoryModel Logical Simple
+OpEntryPoint GLCompute %main "main"
+OpExecutionMode %main LocalSize 1 1 1
+OpName %subgroupscope "subgroupscope"
+OpName %int0 "int0"
+OpName %fn "fn"
+OpName %group "group"
+OpDecorateId %group UniformId %subgroupscope
+%group = OpDecorationGroup
+OpGroupDecorate %group %int0
+%void = OpTypeVoid
+%float = OpTypeFloat 32
+%int = OpTypeInt 32 1
+%subgroupscope = OpConstant %int 3
+%int0 = OpConstantNull %int
+%fn = OpTypeFunction %void
+%main = OpFunction %void None %fn
+%entry = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(spirv, SPV_ENV_UNIVERSAL_1_4);
+  EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions(SPV_ENV_UNIVERSAL_1_4));
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("must not be an OpDecorationGroup instruction.\n"
+                        "  OpDecorateId %group UniformId %subgroupscope"));
+}
+
+TEST_F(ValidateDecorations, DecorateIdOutOfOrderBad) {
+  const std::string spirv = R"(
+OpCapability Shader
+OpMemoryModel Logical Simple
+OpEntryPoint GLCompute %main "main"
+OpExecutionMode %main LocalSize 1 1 1
+OpName %subgroupscope "subgroupscope"
+OpName %int0 "int0"
+OpName %fn "fn"
+OpDecorateId %int0 UniformId %subgroupscope
+%void = OpTypeVoid
+%float = OpTypeFloat 32
+%int = OpTypeInt 32 1
+%int0 = OpConstantNull %int
+%subgroupscope = OpConstant %int 3
+%fn = OpTypeFunction %void
+%main = OpFunction %void None %fn
+%entry = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+  CompileSuccessfully(spirv, SPV_ENV_UNIVERSAL_1_4);
+  EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions(SPV_ENV_UNIVERSAL_1_4));
+  EXPECT_THAT(getDiagnosticString(),
+              HasSubstr("[%subgroupscope]' must appear earlier in the"
+                        " binary than the target\n"
+                        "  OpDecorateId %int0 UniformId %subgroupscope"));
+}
+
 // Uniform and UniformId decorations
 
 TEST_F(ValidateDecorations, UniformDecorationGood) {
@@ -5486,6 +5577,7 @@ OpName %subgroupscope "subgroupscope"
 OpName %call "call"
 OpName %myfunc "myfunc"
 OpName %int0 "int0"
+OpName %int1 "int1"
 OpName %float0 "float0"
 OpName %fn "fn"
 )") + inst +
@@ -5493,10 +5585,11 @@ OpName %fn "fn"
 %void = OpTypeVoid
 %float = OpTypeFloat 32
 %int = OpTypeInt 32 1
-%int0 = OpConstantNull %int
+%int1 = OpConstant %int 1
 %int_99 = OpConstant %int 99
 %subgroupscope = OpConstant %int 3
 %float0 = OpConstantNull %float
+%int0 = OpConstantNull %int
 %fn = OpTypeFunction %void
 %myfunc = OpFunction %void None %fn
 %myfuncentry = OpLabel
@@ -5613,7 +5706,7 @@ TEST_F(ValidateDecorations,
 
 TEST_F(ValidateDecorations, UniformDecorationWithScopeIdV14VulkanEnv) {
   const std::string spirv =
-      ShaderWithUniformLikeDecoration("OpDecorateId %int0 UniformId %int0");
+      ShaderWithUniformLikeDecoration("OpDecorateId %int0 UniformId %int1");
 
   CompileSuccessfully(spirv, SPV_ENV_VULKAN_1_1_SPIRV_1_4);
   EXPECT_EQ(SPV_ERROR_INVALID_DATA,
@@ -6595,12 +6688,14 @@ OpFunctionEnd
   EXPECT_EQ(SPV_SUCCESS, ValidateInstructions(SPV_ENV_VULKAN_1_1));
 }
 
-// NonWritable
+// NonReadable/NonWritable
 
 // Returns a SPIR-V shader module with variables in various storage classes,
-// parameterizable by which ID should be decorated as NonWritable.
-std::string ShaderWithNonWritableTarget(const std::string& target,
-                                        bool member_decorate = false) {
+// parameterizable by which ID should be decorated as NonReadable or
+// NonWritable.
+std::string ShaderWithNonReadableNonWritableTarget(
+    const std::string& target, bool member_decorate = false,
+    const std::string& decoration = "NonWritable") {
   const std::string decoration_inst =
       std::string(member_decorate ? "OpMemberDecorate " : "OpDecorate ") +
       target + (member_decorate ? " 0" : "");
@@ -6608,8 +6703,10 @@ std::string ShaderWithNonWritableTarget(const std::string& target,
   return std::string(R"(
             OpCapability Shader
             OpCapability RuntimeDescriptorArrayEXT
+            OpCapability TensorsARM
             OpExtension "SPV_EXT_descriptor_indexing"
             OpExtension "SPV_KHR_storage_buffer_storage_class"
+            OpExtension "SPV_ARM_tensors"
             OpMemoryModel Logical GLSL450
             OpEntryPoint Vertex %main "main"
             OpName %label "label"
@@ -6629,9 +6726,9 @@ std::string ShaderWithNonWritableTarget(const std::string& target,
             OpMemberDecorate %struct_b_rtarr 0 Offset 0
             OpDecorate %rtarr ArrayStride 4
 )") + decoration_inst +
+         " " + decoration +
 
-         R"( NonWritable
-
+         R"(
       %void = OpTypeVoid
    %void_fn = OpTypeFunction %void
      %float = OpTypeFloat 32
@@ -6646,6 +6743,8 @@ std::string ShaderWithNonWritableTarget(const std::string& target,
  %imstor = OpTypeImage %float 2D 0 0 0 2 R32f
  ; sampled image
  %imsam = OpTypeImage %float 2D 0 0 0 1 R32f
+ ; tensor
+ %tensor = OpTypeTensorARM %float %int_2
 %array_imstor = OpTypeArray %imstor %int_2
 %rta_imstor = OpTypeRuntimeArray %imstor
 
@@ -6659,6 +6758,7 @@ std::string ShaderWithNonWritableTarget(const std::string& target,
 %_ptr_imsam              = OpTypePointer UniformConstant %imsam
 %_ptr_array_imstor       = OpTypePointer UniformConstant %array_imstor
 %_ptr_rta_imstor         = OpTypePointer UniformConstant %rta_imstor
+%_ptr_tensor_UniformConstant = OpTypePointer UniformConstant %tensor
 
 %extra_fn = OpTypeFunction %void %float %_ptr_Private %_ptr_imstor
 
@@ -6671,6 +6771,7 @@ std::string ShaderWithNonWritableTarget(const std::string& target,
 %var_imsam = OpVariable %_ptr_imsam UniformConstant
 %var_array_imstor = OpVariable %_ptr_array_imstor UniformConstant
 %var_rta_imstor = OpVariable %_ptr_rta_imstor UniformConstant
+%var_tensor = OpVariable %_ptr_tensor_UniformConstant UniformConstant
 
   %helper = OpFunction %void None %extra_fn
  %param_f = OpFunctionParameter %float
@@ -6690,7 +6791,7 @@ std::string ShaderWithNonWritableTarget(const std::string& target,
 }
 
 TEST_F(ValidateDecorations, NonWritableLabelTargetBad) {
-  std::string spirv = ShaderWithNonWritableTarget("%label");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%label");
 
   CompileSuccessfully(spirv);
   EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
@@ -6699,7 +6800,7 @@ TEST_F(ValidateDecorations, NonWritableLabelTargetBad) {
 }
 
 TEST_F(ValidateDecorations, NonWritableTypeTargetBad) {
-  std::string spirv = ShaderWithNonWritableTarget("%void");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%void");
 
   CompileSuccessfully(spirv);
   EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
@@ -6708,7 +6809,7 @@ TEST_F(ValidateDecorations, NonWritableTypeTargetBad) {
 }
 
 TEST_F(ValidateDecorations, NonWritableValueTargetBad) {
-  std::string spirv = ShaderWithNonWritableTarget("%float_0");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%float_0");
 
   CompileSuccessfully(spirv);
   EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
@@ -6717,7 +6818,7 @@ TEST_F(ValidateDecorations, NonWritableValueTargetBad) {
 }
 
 TEST_F(ValidateDecorations, NonWritableValueParamBad) {
-  std::string spirv = ShaderWithNonWritableTarget("%param_f");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%param_f");
 
   CompileSuccessfully(spirv);
   EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
@@ -6725,7 +6826,7 @@ TEST_F(ValidateDecorations, NonWritableValueParamBad) {
 }
 
 TEST_F(ValidateDecorations, NonWritablePointerParamButWrongTypeBad) {
-  std::string spirv = ShaderWithNonWritableTarget("%param_p");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%param_p");
 
   CompileSuccessfully(spirv);
   EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
@@ -6733,12 +6834,13 @@ TEST_F(ValidateDecorations, NonWritablePointerParamButWrongTypeBad) {
       getDiagnosticString(),
       HasSubstr(
           "Target of NonWritable decoration is invalid: must "
-          "point to a storage image, uniform block, or storage "
+          "point to a storage image, tensor variable in UniformConstant "
+          "storage class, uniform block, or storage "
           "buffer\n  %param_p = OpFunctionParameter %_ptr_Private_float"));
 }
 
 TEST_F(ValidateDecorations, NonWritablePointerParamStorageImageGood) {
-  std::string spirv = ShaderWithNonWritableTarget("%param_pimstor");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%param_pimstor");
 
   CompileSuccessfully(spirv);
   EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
@@ -6746,7 +6848,7 @@ TEST_F(ValidateDecorations, NonWritablePointerParamStorageImageGood) {
 }
 
 TEST_F(ValidateDecorations, NonWritableVarStorageImageGood) {
-  std::string spirv = ShaderWithNonWritableTarget("%var_imstor");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%var_imstor");
 
   CompileSuccessfully(spirv);
   EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
@@ -6754,18 +6856,20 @@ TEST_F(ValidateDecorations, NonWritableVarStorageImageGood) {
 }
 
 TEST_F(ValidateDecorations, NonWritableVarSampledImageBad) {
-  std::string spirv = ShaderWithNonWritableTarget("%var_imsam");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%var_imsam");
 
   CompileSuccessfully(spirv);
   EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
-  EXPECT_THAT(getDiagnosticString(),
-              HasSubstr("Target of NonWritable decoration is invalid: must "
-                        "point to a storage image, uniform block, or storage "
-                        "buffer\n  %var_imsam"));
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr("Target of NonWritable decoration is invalid: must "
+                "point to a storage image, tensor variable in UniformConstant "
+                "storage class, uniform block, or storage "
+                "buffer\n  %var_imsam"));
 }
 
 TEST_F(ValidateDecorations, NonWritableVarUboGood) {
-  std::string spirv = ShaderWithNonWritableTarget("%var_ubo");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%var_ubo");
 
   CompileSuccessfully(spirv);
   EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
@@ -6798,7 +6902,7 @@ OpFunctionEnd
 }
 
 TEST_F(ValidateDecorations, NonWritableVarSsboInStorageBufferGood) {
-  std::string spirv = ShaderWithNonWritableTarget("%var_ssbo_sb");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%var_ssbo_sb");
 
   CompileSuccessfully(spirv);
   EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
@@ -6806,7 +6910,8 @@ TEST_F(ValidateDecorations, NonWritableVarSsboInStorageBufferGood) {
 }
 
 TEST_F(ValidateDecorations, NonWritableMemberOfSsboInStorageBufferGood) {
-  std::string spirv = ShaderWithNonWritableTarget("%struct_b_rtarr", true);
+  std::string spirv =
+      ShaderWithNonReadableNonWritableTarget("%struct_b_rtarr", true);
 
   CompileSuccessfully(spirv);
   EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
@@ -6814,59 +6919,99 @@ TEST_F(ValidateDecorations, NonWritableMemberOfSsboInStorageBufferGood) {
 }
 
 TEST_F(ValidateDecorations, NonWritableMemberOfStructGood) {
-  std::string spirv = ShaderWithNonWritableTarget("%simple_struct", true);
+  std::string spirv =
+      ShaderWithNonReadableNonWritableTarget("%simple_struct", true);
 
   CompileSuccessfully(spirv);
   EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
 }
 
+TEST_F(ValidateDecorations, NonWritableTensorVarUniformConstantGood) {
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%var_tensor");
+
+  CompileSuccessfully(spirv);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(), Eq(""));
+}
+
+TEST_F(ValidateDecorations, NonReadableTensorVarUniformConstantGood) {
+  std::string spirv = ShaderWithNonReadableNonWritableTarget(
+      "%var_tensor", false, "NonReadable");
+
+  CompileSuccessfully(spirv);
+  EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
+  EXPECT_THAT(getDiagnosticString(), Eq(""));
+}
+
 TEST_F(ValidateDecorations, NonWritableVarWorkgroupBad) {
-  std::string spirv = ShaderWithNonWritableTarget("%var_wg");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%var_wg");
 
   CompileSuccessfully(spirv);
   EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
-  EXPECT_THAT(getDiagnosticString(),
-              HasSubstr("Target of NonWritable decoration is invalid: must "
-                        "point to a storage image, uniform block, or storage "
-                        "buffer\n  %var_wg"));
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr("Target of NonWritable decoration is invalid: must "
+                "point to a storage image, tensor variable in UniformConstant "
+                "storage class, uniform block, or storage "
+                "buffer\n  %var_wg"));
+}
+
+TEST_F(ValidateDecorations, NonReadableVarWorkgroupBad) {
+  std::string spirv =
+      ShaderWithNonReadableNonWritableTarget("%var_wg", false, "NonReadable");
+
+  CompileSuccessfully(spirv);
+  EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr("Target of NonReadable decoration is invalid: must "
+                "point to a storage image, tensor variable in UniformConstant "
+                "storage class, uniform block, or storage "
+                "buffer\n  %var_wg"));
 }
 
 TEST_F(ValidateDecorations, NonWritableVarWorkgroupV14Bad) {
-  std::string spirv = ShaderWithNonWritableTarget("%var_wg");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%var_wg");
 
   CompileSuccessfully(spirv, SPV_ENV_UNIVERSAL_1_4);
   EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions(SPV_ENV_UNIVERSAL_1_4));
-  EXPECT_THAT(getDiagnosticString(),
-              HasSubstr("Target of NonWritable decoration is invalid: must "
-                        "point to a storage image, uniform block, storage "
-                        "buffer, or variable in Private or Function storage "
-                        "class\n  %var_wg"));
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr("Target of NonWritable decoration is invalid: must "
+                "point to a storage image, tensor variable in UniformConstant "
+                "storage class, uniform block, storage "
+                "buffer, or variable in Private or Function storage class\n  "
+                "%var_wg"));
 }
 
 TEST_F(ValidateDecorations, NonWritableVarPrivateBad) {
-  std::string spirv = ShaderWithNonWritableTarget("%var_priv");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%var_priv");
 
   CompileSuccessfully(spirv);
   EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
-  EXPECT_THAT(getDiagnosticString(),
-              HasSubstr("Target of NonWritable decoration is invalid: must "
-                        "point to a storage image, uniform block, or storage "
-                        "buffer\n  %var_priv"));
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr("Target of NonWritable decoration is invalid: must "
+                "point to a storage image, tensor variable in UniformConstant "
+                "storage class, uniform block, or storage "
+                "buffer\n  %var_priv"));
 }
 
 TEST_F(ValidateDecorations, NonWritableVarPrivateV13Bad) {
-  std::string spirv = ShaderWithNonWritableTarget("%var_priv");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%var_priv");
 
   CompileSuccessfully(spirv);
   EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions(SPV_ENV_UNIVERSAL_1_3));
-  EXPECT_THAT(getDiagnosticString(),
-              HasSubstr("Target of NonWritable decoration is invalid: must "
-                        "point to a storage image, uniform block, or storage "
-                        "buffer\n  %var_priv"));
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr("Target of NonWritable decoration is invalid: must "
+                "point to a storage image, tensor variable in UniformConstant "
+                "storage class, uniform block, or storage "
+                "buffer\n  %var_priv"));
 }
 
 TEST_F(ValidateDecorations, NonWritableVarPrivateV14Good) {
-  std::string spirv = ShaderWithNonWritableTarget("%var_priv");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%var_priv");
 
   CompileSuccessfully(spirv, SPV_ENV_UNIVERSAL_1_4);
   EXPECT_EQ(SPV_SUCCESS, ValidateInstructions(SPV_ENV_UNIVERSAL_1_4));
@@ -6874,36 +7019,41 @@ TEST_F(ValidateDecorations, NonWritableVarPrivateV14Good) {
 }
 
 TEST_F(ValidateDecorations, NonWritableVarPrivateV13TargetV14Bad) {
-  std::string spirv = ShaderWithNonWritableTarget("%var_priv");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%var_priv");
 
   CompileSuccessfully(spirv, SPV_ENV_UNIVERSAL_1_3);
   EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions(SPV_ENV_UNIVERSAL_1_4));
-  EXPECT_THAT(getDiagnosticString(),
-              HasSubstr("Target of NonWritable decoration is invalid: must "
-                        "point to a storage image, uniform block, or storage "
-                        "buffer\n  %var_priv"));
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr("Target of NonWritable decoration is invalid: must "
+                "point to a storage image, tensor variable in UniformConstant "
+                "storage class, uniform block, or storage "
+                "buffer\n  %var_priv"));
 }
 
 TEST_F(ValidateDecorations, NonWritableVarFunctionBad) {
-  std::string spirv = ShaderWithNonWritableTarget("%var_func");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%var_func");
 
   CompileSuccessfully(spirv);
   EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions());
-  EXPECT_THAT(getDiagnosticString(),
-              HasSubstr("Target of NonWritable decoration is invalid: must "
-                        "point to a storage image, uniform block, or storage "
-                        "buffer\n  %var_func"));
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr("Target of NonWritable decoration is invalid: must "
+                "point to a storage image, tensor variable in UniformConstant "
+                "storage class, uniform block, or storage "
+                "buffer\n  %var_func"));
 }
 
 TEST_F(ValidateDecorations, NonWritableArrayGood) {
-  std::string spirv = ShaderWithNonWritableTarget("%var_array_imstor");
+  std::string spirv =
+      ShaderWithNonReadableNonWritableTarget("%var_array_imstor");
 
   CompileSuccessfully(spirv);
   EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
 }
 
 TEST_F(ValidateDecorations, NonWritableRuntimeArrayGood) {
-  std::string spirv = ShaderWithNonWritableTarget("%var_rta_imstor");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%var_rta_imstor");
 
   CompileSuccessfully(spirv);
   EXPECT_EQ(SPV_SUCCESS, ValidateInstructions());
@@ -6944,18 +7094,20 @@ INSTANTIATE_TEST_SUITE_P(
                 "is not valid for the Vulkan execution environment."))));
 
 TEST_F(ValidateDecorations, NonWritableVarFunctionV13Bad) {
-  std::string spirv = ShaderWithNonWritableTarget("%var_func");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%var_func");
 
   CompileSuccessfully(spirv);
   EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions(SPV_ENV_UNIVERSAL_1_3));
-  EXPECT_THAT(getDiagnosticString(),
-              HasSubstr("Target of NonWritable decoration is invalid: must "
-                        "point to a storage image, uniform block, or storage "
-                        "buffer\n  %var_func"));
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr("Target of NonWritable decoration is invalid: must "
+                "point to a storage image, tensor variable in UniformConstant "
+                "storage class, uniform block, or storage "
+                "buffer\n  %var_func"));
 }
 
 TEST_F(ValidateDecorations, NonWritableVarFunctionV14Good) {
-  std::string spirv = ShaderWithNonWritableTarget("%var_func");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%var_func");
 
   CompileSuccessfully(spirv, SPV_ENV_UNIVERSAL_1_4);
   EXPECT_EQ(SPV_SUCCESS, ValidateInstructions(SPV_ENV_UNIVERSAL_1_4));
@@ -6963,14 +7115,16 @@ TEST_F(ValidateDecorations, NonWritableVarFunctionV14Good) {
 }
 
 TEST_F(ValidateDecorations, NonWritableVarFunctionV13TargetV14Bad) {
-  std::string spirv = ShaderWithNonWritableTarget("%var_func");
+  std::string spirv = ShaderWithNonReadableNonWritableTarget("%var_func");
 
   CompileSuccessfully(spirv, SPV_ENV_UNIVERSAL_1_3);
   EXPECT_EQ(SPV_ERROR_INVALID_ID, ValidateInstructions(SPV_ENV_UNIVERSAL_1_4));
-  EXPECT_THAT(getDiagnosticString(),
-              HasSubstr("Target of NonWritable decoration is invalid: must "
-                        "point to a storage image, uniform block, or storage "
-                        "buffer\n  %var_func"));
+  EXPECT_THAT(
+      getDiagnosticString(),
+      HasSubstr("Target of NonWritable decoration is invalid: must "
+                "point to a storage image, tensor variable in UniformConstant "
+                "storage class, uniform block, or storage "
+                "buffer\n  %var_func"));
 }
 
 TEST_F(ValidateDecorations, BufferBlockV13ValV14Good) {
@@ -10394,7 +10548,7 @@ TEST_F(ValidateDecorations, ComponentMultipleArrays) {
                OpDecorate %gl_PerVertex Block
                OpDecorate %FOO Component 2
                OpDecorate %FOO Location 1
-               OpDecorate %FOO0 Location 4
+               OpDecorate %FOO0 Location 1
                OpDecorate %FOO0 Component 0
        %void = OpTypeVoid
           %3 = OpTypeFunction %void
@@ -10458,8 +10612,8 @@ const std::string kNodeShaderPostlude = R"(
 %node1 = OpConstantStringAMDX "node1"
 %node2 = OpConstantStringAMDX "node2"
 %S = OpTypeStruct
-%_payloadarr_S = OpTypeNodePayloadArrayAMDX %S
 %_payloadarr_S_0 = OpTypeNodePayloadArrayAMDX %S
+%_payloadarr_S = OpTypeNodePayloadArrayAMDX %S
 %bool = OpTypeBool
 %true = OpConstantTrue %bool
 %void = OpTypeVoid
